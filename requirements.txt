@@ -1,0 +1,5 @@
+numpy
+opencv-python            # cv2
+scikit-image             # structural_similarity
+huggingface-hub
+# tensorflow>=2.11,<2.16   # first TF series with Py-3.10 wheels
