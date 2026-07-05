@@ -9,6 +9,47 @@ import xml.dom.minidom as minidom
 from urllib.parse import urlparse
 import json
 
+
+# ============================================================
+# EXE runtime error logger
+# ============================================================
+def _get_runtime_base_dir():
+    import sys
+    from pathlib import Path
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _write_runtime_log(step_name: str, text: str) -> str:
+    import time
+    log_dir = _get_runtime_base_dir() / "runtime_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{step_name}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+    log_path.write_text(text, encoding="utf-8")
+    return str(log_path)
+
+
+def _handle_fatal_exception(step_name: str):
+    import traceback
+    text = traceback.format_exc()
+    log_path = _write_runtime_log(step_name, text)
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            f"{step_name} crashed",
+            f"{step_name} crashed.\n\n"
+            f"Error log saved to:\n{log_path}\n\n"
+            "Please send this log to GISH."
+        )
+        root.destroy()
+    except Exception:
+        pass
+    raise
+
 class VideoCropper:
     def __init__(self, root, video_source, xml_filename):
         self.root = root
@@ -92,19 +133,23 @@ class VideoCropper:
             self.video_source = simpledialog.askstring("Input", "Enter stream URL:")
 
     def prompt_output_filename(self):
-        """Prompt user for the XML output filename (only used for video/stream annotations)."""
-        filename = simpledialog.askstring(
-            "Output Filename",
-            "Enter output annotation XML filename (saved in 'outputs' folder):",
+        """Prompt user for the XML output path. EXE-friendly: no code editing needed."""
+        output_dir = os.path.abspath("outputs")
+        os.makedirs(output_dir, exist_ok=True)
+
+        filename = filedialog.asksaveasfilename(
+            title="Save annotation XML as",
+            initialdir=output_dir,
+            initialfile="annotation.xml",
+            defaultextension=".xml",
+            filetypes=[("XML Files", "*.xml"), ("All Files", "*.*")],
         )
+
         if filename:
             self.xml_filename = filename
-            if not self.xml_filename.endswith(".xml"):
-                self.xml_filename += ".xml"
-            self.xml_filename = os.path.join("outputs", self.xml_filename)
         else:
             # fallback if user hits cancel
-            self.xml_filename = os.path.join("outputs", "default_annotation.xml")
+            self.xml_filename = os.path.join(output_dir, "default_annotation.xml")
 
     def determine_source_type_and_open(self):
         """Check if user’s choice is a URL, local video, or an image, and open accordingly."""
@@ -134,7 +179,7 @@ class VideoCropper:
                     raise Exception("Error: Unable to open video file.")
 
     def create_ui(self):
-        self.root.title("Video/Image Cropper Tool")
+        self.root.title("Step 1 - Poker Annotation Tool")
         control_frame = ttk.Frame(self.root, padding=(10, 10, 10, 10))
         control_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -266,10 +311,10 @@ class VideoCropper:
         # 5) Finally, warp using the *new* bounding box
         self.rotated_fullres_frame = cv2.warpAffine(self.frame, rotation_mat, (new_w, new_h))
 
-        # 6) Resize for display, then show it
+        # 6) Resize for display, then render it together with all saved regions.
+        # Keep self.resized_frame clean; rectangles are drawn only on a temporary copy.
         self.resized_frame = self.resize_frame_for_display(self.rotated_fullres_frame)
-        cv2.imshow("poker_crop_tool", self.resized_frame)
-        cv2.setMouseCallback("poker_crop_tool", self.draw_rectangle)
+        self.render_current_view()
 
     # ------------------ Video controls ------------------ #
     def resume_video(self):
@@ -332,32 +377,59 @@ class VideoCropper:
         self.set_tilt_button.grid_remove()
 
     # ------------------ Cropping logic ------------------ #
+    def render_current_view(self):
+        """Render the clean frame plus saved and actively-drawn crop rectangles.
+
+        self.resized_frame always remains a clean image. This method draws overlays
+        onto a temporary copy so completed rectangles remain visible while idle,
+        while still allowing Reset Cropped Regions to remove them immediately.
+        """
+        if self.resized_frame is None:
+            return
+
+        display_frame = self.resized_frame.copy()
+
+        # Draw every completed crop region.
+        for region in self.cropped_regions:
+            cv2.rectangle(
+                display_frame,
+                (region['x_min'], region['y_min']),
+                (region['x_max'], region['y_max']),
+                (0, 255, 0),
+                2,
+            )
+
+        # While the mouse is being dragged, also show the active rectangle.
+        if self.cropping:
+            cv2.rectangle(
+                display_frame,
+                (self.x_start, self.y_start),
+                (self.x_end, self.y_end),
+                (0, 255, 0),
+                2,
+            )
+
+        cv2.imshow("poker_crop_tool", display_frame)
+        cv2.setMouseCallback("poker_crop_tool", self.draw_rectangle)
+        cv2.waitKey(1)
+
     def draw_rectangle(self, event, x, y, flags, param):
-        """Mouse callback for cropping (drag rectangle on resized_frame)."""
+        """Mouse callback for cropping on the resized display frame."""
         if event == cv2.EVENT_LBUTTONDOWN:
-            self.x_start, self.y_start = x, y
+            self.x_start = self.x_end = x
+            self.y_start = self.y_end = y
             self.cropping = True
+            self.render_current_view()
 
         elif event == cv2.EVENT_MOUSEMOVE and self.cropping:
             self.x_end, self.y_end = x, y
-            frame_copy = self.resized_frame.copy()
-            cv2.rectangle(frame_copy, (self.x_start, self.y_start),
-                          (self.x_end, self.y_end), (0, 255, 0), 2)
+            self.render_current_view()
 
-            # Draw previously cropped
-            for region in self.cropped_regions:
-                cv2.rectangle(frame_copy,
-                              (region['x_min'], region['y_min']),
-                              (region['x_max'], region['y_max']),
-                              (0, 255, 0), 2)
-
-            cv2.imshow("poker_crop_tool", frame_copy)
-
-        elif event == cv2.EVENT_LBUTTONUP:
+        elif event == cv2.EVENT_LBUTTONUP and self.cropping:
             self.x_end, self.y_end = x, y
             self.cropping = False
 
-            # Store bounding box in displayed coordinates
+            # Store bounding box in displayed coordinates.
             rect_display = {
                 'x_min': min(self.x_start, self.x_end),
                 'x_max': max(self.x_start, self.x_end),
@@ -365,8 +437,9 @@ class VideoCropper:
                 'y_max': max(self.y_start, self.y_end)
             }
             self.cropped_regions.append(rect_display)
-            
-            # If we haven’t actually rotated (e.g. playing video), use self.frame
+
+            # If we have not actually rotated (for example, playing video),
+            # use the current full-resolution frame.
             base_frame = self.rotated_fullres_frame
             if base_frame is None:
                 base_frame = self.frame
@@ -385,10 +458,18 @@ class VideoCropper:
             }
             self.real_cropped_regions.append(real_rect)
 
+            # Immediately redraw so the completed rectangle remains visible
+            # even after the mouse button is released.
+            self.render_current_view()
+
     def reset_cropped_regions(self):
+        """Clear all regions and immediately redraw the clean frame."""
         self.cropped_regions.clear()
         self.real_cropped_regions.clear()
-        print("Cropped regions have been reset.")
+        self.cropping = False
+        self.x_start = self.y_start = self.x_end = self.y_end = 0
+        self.render_current_view()
+        print("Cropped regions have been reset and cleared from the view.")
 
     # ------------------ Frame display loop ------------------ #
     def update_video_frame(self):
@@ -400,8 +481,7 @@ class VideoCropper:
             # without flicker. Usually this won't cause big overhead.
             if self.rotated_fullres_frame is not None:
                 self.resized_frame = self.resize_frame_for_display(self.rotated_fullres_frame)
-                cv2.imshow("poker_crop_tool", self.resized_frame)
-                cv2.setMouseCallback("poker_crop_tool", self.draw_rectangle)
+                self.render_current_view()
         else:
             # Handle video
             if self.video_playing and self.video_capture.isOpened():
@@ -411,8 +491,7 @@ class VideoCropper:
                     # (unless you prefer). Typically we do that if paused.
                     self.resized_frame = self.resize_frame_for_display(self.frame)
                     self.stopped_frame = self.resized_frame.copy()
-                    cv2.imshow("poker_crop_tool", self.resized_frame)
-                    cv2.setMouseCallback("poker_crop_tool", self.draw_rectangle)
+                    self.render_current_view()
 
                     delay = int(1000 / self.fps)
                     cv2.waitKey(delay)
@@ -476,7 +555,7 @@ class VideoCropper:
             self.current_label += 1
 
     def save_annotations_to_xml(self, width, height, game_type, version):
-        header = f'<?xml version="{version}" encoding="utf-8"?>'
+        header = '<?xml version="1.0" encoding="utf-8"?>'
         annotation = ET.Element("annotation")
 
         size = ET.SubElement(annotation, "size")
@@ -512,6 +591,10 @@ class VideoCropper:
 
         full_xml_string = header + pretty_xml.split("?>", 1)[1]
 
+        output_dir = os.path.dirname(os.path.abspath(self.xml_filename))
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
         with open(self.xml_filename, "w", encoding="utf-8") as f:
             f.write(full_xml_string)
 
@@ -537,6 +620,10 @@ class VideoCropper:
 
         self.json_filename = self.xml_filename.replace(".xml", ".json")
 
+        output_dir = os.path.dirname(os.path.abspath(self.json_filename))
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
         with open(self.json_filename, "w", encoding="utf-8") as json_file:
             json.dump(annotation_data, json_file, indent=4)
 
@@ -546,7 +633,7 @@ class VideoCropper:
         cv2.destroyAllWindows()
         self.root.quit()
 
-if __name__ == "__main__":
+def main() -> None:
     root = tk.Tk()
     root.geometry("300x300")
 
@@ -558,3 +645,10 @@ if __name__ == "__main__":
 
     cropper = VideoCropper(root, video_source, xml_filename)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        _handle_fatal_exception("Step1_Annotation_Tool")
