@@ -1,12 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Build command:
+#   python -m PyInstaller --clean -y Step2_Crop_By_Annotation.spec
+# Optional debug console:
+#   set POKER_TOOL_DEBUG_CONSOLE=1
+#   python -m PyInstaller --clean -y Step2_Crop_By_Annotation.spec
+
+import os
+
+DEBUG_CONSOLE = os.environ.get("POKER_TOOL_DEBUG_CONSOLE", "0") == "1"
 
 
 a = Analysis(
-    ['Step1_get_poker_annotation.py'],
-    pathex=[],
+    ['Step2_Crop_by_annotation.py'],
+    pathex=[os.getcwd()],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['cv2'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -21,12 +30,12 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='poker_crop_tool',
+    name='Step2_Crop_By_Annotation',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    console=True,
+    upx=False,
+    console=DEBUG_CONSOLE,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -38,7 +47,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
-    name='poker_crop_tool',
+    name='Step2_Crop_By_Annotation',
 )
